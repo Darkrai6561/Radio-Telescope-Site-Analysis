@@ -1,0 +1,32 @@
+# =========================
+# Data
+# =========================
+DEMs/
+ERA5_DATABASE/
+
+# Generated outputs
+
+horizon_test/
+*.amc
+*.npz
+*.npy
+
+# Archives
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
