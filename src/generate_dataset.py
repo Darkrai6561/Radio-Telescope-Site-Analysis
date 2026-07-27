@@ -69,10 +69,10 @@ from dataset import (
 # Defaults (matches the paths already used in test.py -- override via CLI)
 # ---------------------------------------------------------------------------
 
-DEFAULT_DEM_PATH = r"C:\Users\Darkrai\Projects\iitk proj\DEMs\Kanpur\Kanpur_90.tif"
-DEFAULT_ERA5_DIR = r"C:\Users\Darkrai\Projects\iitk proj\ERA5_DATABASE\site_264967_802413"
+DEFAULT_DEM_PATH = r"C:\Users\Darkrai\Projects\iitk proj\DEMs\ponmudi\Ponmudi.tif"
+DEFAULT_ERA5_DIR = r"C:\Users\Darkrai\Projects\iitk proj\ERA5_DATABASE\site_87603_771167"
 DEFAULT_AM_EXE = r"am.exe"
-DEFAULT_OUTPUT_DIR = r"C:\Users\Darkrai\Projects\iitk proj\datasets"
+DEFAULT_OUTPUT_DIR = r"C:\Users\Darkrai\Projects\iitk proj\datasets\Ponmudi"
 
 # Pressure files are expected to live at <era5_dir>/pressure_<year>.npz
 PRESSURE_FILE_PATTERN = "pressure_{year}.npz"
