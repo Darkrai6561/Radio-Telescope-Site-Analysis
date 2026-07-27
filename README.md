@@ -1,5 +1,5 @@
 # Atmospheric Radiative-Transfer Surrogate
-
+## THE NOTEBOOKS WERE MAINLY USED FOR TESTING SO USE THEM ONLY AS A REFERENCE EXCEPT THE downloder.ipynb . THE MAJOR NOTEBOOKS ARE THE 2 NOTEBOOKS IN src DIRECTORY
 This project builds a fast neural-network surrogate for atmospheric radiative-transfer spectra. It uses ERA5 atmospheric profiles and a digital elevation model (DEM) to construct an atmosphere at a site or across terrain, generates reference spectra with the external **AM** radiative-transfer model, and trains PyTorch models to predict:
 
 - atmospheric transmittance (`tx`)
