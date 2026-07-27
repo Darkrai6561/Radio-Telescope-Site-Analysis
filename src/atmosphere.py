@@ -6,7 +6,9 @@ DEFAULT_FREQ_START = 2.0
 DEFAULT_FREQ_STOP = 14.0
 
 # Slightly below 40 MHz to avoid unresolved spectral-line warnings in AM.
-DEFAULT_FREQ_STEP = 0.039993653
+DEFAULT_FREQ_STEP = 0.01
+
+
 def write_layer(
     pressure,
     temperature,
@@ -46,37 +48,32 @@ def write_layer(
     """
 
     lines = []
-
     lines.append("layer")
     lines.append(f"Pbase {pressure:.2f} Pa")
     lines.append(f"Tbase {temperature:.3f} K")
 
-    # Dry atmosphere
+    # Dry air.
     lines.append("column dry_air hydrostatic")
 
-    # Water vapour
+    # Water vapour.
     lines.append(f"column h2o vmr {vmr:.8e}")
 
-    # Ozone
+    # Ozone.
     if ozone is not None:
         lines.append(f"column o3 vmr {ozone:.8e}")
 
-    # Clouds
-    # Liquid cloud
+    # Liquid cloud.
     if lwp > 0:
-        lines.append(
-            f"column lwp_abs_Rayleigh {lwp:.8e} kg*m^-2"
-        )
+        lines.append(f"column lwp_abs_Rayleigh {lwp:.8e} kg*m^-2")
 
-    # Ice cloud
+    # Ice cloud.
     if iwp > 0:
-        lines.append(
-            f"column iwp_abs_Rayleigh {iwp:.8e} kg*m^-2"
-        )
+        lines.append(f"column iwp_abs_Rayleigh {iwp:.8e} kg*m^-2")
 
     lines.append("")
 
     return "\n".join(lines)
+
 
 def build_amc(
     pressure_levels,
@@ -93,7 +90,7 @@ def build_amc(
     freq_start=DEFAULT_FREQ_START,
     freq_stop=DEFAULT_FREQ_STOP,
     freq_step=DEFAULT_FREQ_STEP,
-    zenith_angle=0.0
+    zenith_angle=0.0,
 ):
     """
     Build a complete AM atmosphere (.amc) as a string.
@@ -137,40 +134,15 @@ def build_amc(
         Complete AMC file.
     """
 
-    # --------------------------------------------------
-    # Insert surface level
-    # --------------------------------------------------
-
-    pressure = np.insert(
-        pressure_levels,
-        insert_idx,
-        surface_pressure,
-    )
-
-    temperature = np.insert(
-        temperature,
-        insert_idx,
-        surface_temperature,
-    )
-
-    vmr = np.insert(
-        vmr,
-        insert_idx,
-        surface_vmr,
-    )
+    # Insert the surface level.
+    pressure = np.insert(pressure_levels, insert_idx, surface_pressure)
+    temperature = np.insert(temperature, insert_idx, surface_temperature)
+    vmr = np.insert(vmr, insert_idx, surface_vmr)
 
     if ozone is not None:
-        ozone = np.insert(
-            ozone,
-            insert_idx,
-            ozone[insert_idx - 1],
-        )
+        ozone = np.insert(ozone, insert_idx, ozone[insert_idx - 1])
 
-    # --------------------------------------------------
-    # Reverse for AM
-    # AM expects top -> surface
-    # --------------------------------------------------
-
+    # AM expects top to surface order.
     pressure = pressure[insert_idx:][::-1]
     temperature = temperature[insert_idx:][::-1]
     vmr = vmr[insert_idx:][::-1]
@@ -178,35 +150,24 @@ def build_amc(
     if ozone is not None:
         ozone = ozone[insert_idx:][::-1]
 
-    # --------------------------------------------------
-    # Header
-    # --------------------------------------------------
-
+    # Header.
     lines = []
-
     lines.append(f"# {title}")
     lines.append("")
-    lines.append(
-        f"f {freq_start:g} GHz {freq_stop:g} GHz {freq_step} GHz"
-    )
+    lines.append(f"f {freq_start:g} GHz {freq_stop:g} GHz {freq_step} GHz")
     lines.append("output f GHz tx Tb K")
     lines.append("T0 2.7 K")
     lines.append(f"za {zenith_angle:g} deg")
     lines.append("")
 
-    # --------------------------------------------------
-    # Layers
-    # --------------------------------------------------
-
+    # Layers.
     n_layers = len(pressure)
 
     for i in range(n_layers):
-
         layer_lwp = 0.0
         layer_iwp = 0.0
 
-        # Put cloud in lowest layer by default.
-        # Can be changed later if desired.
+        # Put clouds in the lowest layer by default.
         if i == n_layers - 1:
             layer_lwp = lwp
             layer_iwp = iwp
@@ -229,6 +190,7 @@ def build_amc(
 
     return "\n".join(lines)
 
+
 def save_amc(path, amc_text):
     """
     Save an AM atmosphere (.amc) file.
@@ -243,15 +205,10 @@ def save_amc(path, amc_text):
     """
 
     path = Path(path)
-
     path.parent.mkdir(parents=True, exist_ok=True)
-
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(amc_text)
-
     return path
-
-
 
 def load_amc(path):
     """
@@ -268,6 +225,5 @@ def load_amc(path):
     """
 
     path = Path(path)
-
     with open(path, "r", encoding="utf-8") as f:
         return f.read()

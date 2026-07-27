@@ -7,10 +7,11 @@ from numba import njit, prange
 
 
 def load_dem(SITE_DIR):
-    dem_src = rasterio.open(SITE_DIR)
-    elevation_data = dem_src.read(1)
-    transform = dem_src.transform
-    bounds = dem_src.bounds
+    with rasterio.open(SITE_DIR) as dem_src:
+        elevation_data = dem_src.read(1)
+        transform = dem_src.transform
+        bounds = dem_src.bounds
+    
     return elevation_data, transform, bounds
 
 
@@ -97,8 +98,7 @@ def _build_horizon_lookup(
     n_az: int,
 ):
     """
-    Precompute distance and azimuth-bin lookup tables for all possible
-    pixel offsets in a DEM of shape (H, W).
+    Precompute distance and azimuth bins for all DEM offsets.
 
     Offsets are indexed by:
         di in [-(H-1), ..., +(H-1)]
@@ -122,9 +122,7 @@ def _build_horizon_lookup(
 
     for di in range(di_min, H):
         for dj in range(dj_min, W):
-            # Match the original code exactly:
-            # dx = (tj - sj) * pixel_size_m
-            # dy = (si - ti) * pixel_size_m = -(ti - si) * pixel_size_m
+            # Keep the original dx/dy convention.
             dx = dj * pixel_size_m
             dy = -di * pixel_size_m
 
@@ -136,13 +134,12 @@ def _build_horizon_lookup(
             dist_lookup[ii, jj] = math.sqrt(d2)
 
             az = math.degrees(math.atan2(dx, dy))
-            if az < 0.0:
+
+            if az < 0:
                 az += 360.0
 
-            b = int(az + 0.5)
-            if b >= n_az:
-                b -= n_az
-
+            bin_width = 360.0 / n_az
+            b = int((az + bin_width / 2.0) / bin_width) % n_az
             bin_lookup[ii, jj] = b
 
     return (
@@ -226,11 +223,9 @@ def compute_horizon(
     use_curvature=True,
 ):
     """
-    Exact horizon computation, but with precomputed offset lookups.
+    Exact horizon computation with precomputed lookups.
 
-    This preserves the original algorithm:
-    every DEM pixel still gets compared against every other DEM pixel,
-    and the result is binned by azimuth exactly as before.
+    This keeps the original all-pairs comparison and azimuth bins.
     """
     H, W = elevation_data.shape
 

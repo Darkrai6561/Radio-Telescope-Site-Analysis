@@ -29,22 +29,16 @@ def parse_am_output(stdout):
     brightness_temperature = []
 
     for line in stdout.splitlines():
-
         line = line.strip()
-
-        # Skip blank lines
+        # Skip blank lines.
         if not line:
             continue
-
-        # Skip comments and warnings
+        # Skip comments and warnings.
         if line.startswith("#"):
             continue
-
         if line.startswith("!"):
             continue
-
         parts = line.split()
-
         if len(parts) < 3:
             continue
 
@@ -68,97 +62,50 @@ def parse_am_output(stdout):
     return frequency, transmittance, brightness_temperature
 
 
-def run_am(am_executable, amc_file):
-    """
-    Run the Atmospheric Model (AM).
-
-    Parameters
-    ----------
-    am_executable : str or Path
-        Path to am.exe.
-
-    amc_file : str or Path
-        Path to the input .amc file.
-
-    Returns
-    -------
-    frequency : ndarray
-        Frequency (GHz)
-
-    transmittance : ndarray
-        Atmospheric transmittance
-
-    brightness_temperature : ndarray
-        Brightness temperature (K)
-    """
-
+def run_am(am_executable, amc_text):
     am_executable = Path(am_executable)
-    amc_file = Path(amc_file)
 
     result = subprocess.run(
-        [str(am_executable), str(amc_file)],
+        [str(am_executable), "-"],
+        input=amc_text,
         capture_output=True,
         text=True,
         cwd=am_executable.parent,
     )
 
-    # --------------------------------------------------
-    # Try parsing the spectrum first.
-    # If this succeeds, AM produced valid output.
-    # --------------------------------------------------
-
     try:
         frequency, transmittance, brightness_temperature = parse_am_output(
             result.stdout
         )
-
     except RuntimeError:
-
         raise RuntimeError(
             f"""
 AM execution failed.
 
-Executable:
-{am_executable}
-
-AMC file:
-{amc_file}
-
 Return code:
 {result.returncode}
 
-==================== STDOUT ====================
+================ STDOUT ================
 
 {result.stdout}
 
-==================== STDERR ====================
+================ STDERR ================
 
 {result.stderr}
 """
         )
 
-    # --------------------------------------------------
-    # Spectrum exists.
-    # Non-zero return code therefore means warning(s),
-    # not a fatal error.
-    # --------------------------------------------------
-
     if result.returncode != 0:
-
         print("=" * 70)
         print("AM completed with warnings")
         print("=" * 70)
-
-        if result.stdout.strip():
+        if result.stdout:
             print(result.stdout)
-
-        if result.stderr.strip():
+        if result.stderr:
             print(result.stderr)
-
         print("=" * 70)
 
     return frequency, transmittance, brightness_temperature
-
 
 def save_spectrum(
     path,

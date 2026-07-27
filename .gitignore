@@ -5,7 +5,8 @@ DEMs/
 ERA5_DATABASE/
 
 # Generated outputs
-
+*.pt 
+*.pth
 horizon_test/
 *.amc
 *.npz

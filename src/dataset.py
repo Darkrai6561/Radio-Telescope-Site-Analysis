@@ -8,7 +8,7 @@ import time
 
 def collect_training_samples(
     encoded_atmospheres,
-    max_samples=6000,
+    num_samples=6000,
     method="unique_first",
     random_state=42,
 ):
@@ -20,7 +20,7 @@ def collect_training_samples(
     encoded_atmospheres : (N,F) ndarray
         Encoded atmosphere dataset.
 
-    max_samples : int
+    num_samples : int
         Maximum number of atmospheres to collect.
 
     method : str
@@ -51,53 +51,35 @@ def collect_training_samples(
 
     N = len(encoded_atmospheres)
 
-    # --------------------------------------------------
-    # RANDOM
-    # --------------------------------------------------
-
+    # Random subset.
     if method == "random":
-        n = min(max_samples, N)
+        n = min(num_samples, N)
         indices = rng.choice(N, size=n, replace=False)
         return encoded_atmospheres[indices].copy(), indices.astype(np.int32)
 
-    # --------------------------------------------------
-    # UNIQUE FIRST
-    # --------------------------------------------------
-
+    # First unique rows.
     elif method == "unique_first":
         order = np.arange(N)
 
-    # --------------------------------------------------
-    # UNIQUE RANDOM
-    # --------------------------------------------------
-
+    # Unique rows after shuffling.
     elif method == "unique_random":
         order = rng.permutation(N)
 
-    # --------------------------------------------------
-    # STRATIFIED TIME
-    # --------------------------------------------------
-
+    # Uniform time coverage with unique rows.
     elif method == "stratified_time":
-        # Visit the dataset uniformly
-        step = max(N // max_samples, 1)
+        # Visit the dataset uniformly.
+        step = max(N // num_samples, 1)
         order = np.arange(0, N, step)
 
-        # Fill in any missing indices
+        # Backfill skipped indices.
         remaining = np.setdiff1d(np.arange(N), order, assume_unique=True)
         rng.shuffle(remaining)
         order = np.concatenate((order, remaining))
     else:
         raise ValueError(f"Unknown method '{method}'.")
-
-    # --------------------------------------------------
-    # STREAMING UNIQUE COLLECTION
-    # --------------------------------------------------
-
+    # Collect unique rows in order.
     seen = set()
-
     training = []
-
     original_indices = []
 
     for idx in order:
@@ -108,7 +90,7 @@ def collect_training_samples(
         seen.add(key)
         training.append(row.copy())
         original_indices.append(idx)
-        if len(training) >= max_samples:
+        if len(training) >= num_samples:
             break
 
     training = np.asarray(training, dtype=encoded_atmospheres.dtype)
@@ -201,12 +183,9 @@ def build_training_dataset(
         )
 
         spectrum_file = output_dir / f"spectrum_{i:05d}.npz"
-        amc_file = output_dir / f"sample_{i:05d}.amc"
+        
 
-        # --------------------------------------------------
-        # Cached spectrum
-        # --------------------------------------------------
-
+        # Reuse cached spectra unless overwriting.
         if spectrum_file.exists() and not overwrite:
             freq, tx, tb, _ = load_spectrum(spectrum_file)
         else:
@@ -233,26 +212,24 @@ def build_training_dataset(
                 zenith_angle=zenith_angle,
             )
 
-            save_amc(amc_file, amc)
+            
 
             try:
-                freq, tx, tb = run_am(am_executable, amc_file)
+                freq, tx, tb = run_am(am_executable,amc)
             except Exception as e:
                 print(f"\nFailed atmosphere {i}")
                 raise RuntimeError(f"AM failed on sample {i}") from e
 
             save_spectrum(spectrum_file, freq, tx, tb)
 
-            if not keep_amc:
-                amc_file.unlink(missing_ok=True)
+            if keep_amc:
+                amc_file = output_dir / f"sample_{i:05d}.amc"
+                save_amc(amc_file, amc)
 
-        # --------------------------------------------------
-        # Frequency consistency
-        # --------------------------------------------------
-
+        # Keep one shared frequency grid.
         if frequency is None:
             frequency = freq
-        elif not np.allclose(frequency, freq):
+        elif (frequency.shape != freq.shape or not np.allclose(frequency, freq)):
             raise RuntimeError(f"Frequency grid mismatch at sample {i}.")
         transmittance.append(tx)
         brightness_temperature.append(tb)
@@ -390,11 +367,8 @@ def train_test_split(
 
     if not 0.0 < test_size < 1.0:
         raise ValueError("test_size must be between 0 and 1.")
-    else:
-        split = int((1 - test_size) * n)
-
+    split = int((1 - test_size) * n)
     train_idx = indices[:split]
-
     test_idx = indices[split:]
 
     return (

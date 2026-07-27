@@ -1,10 +1,7 @@
 import numpy as np
 import cupy as cp
 
-# ==========================================================
-# CONSTANTS
-# ==========================================================
-
+# Constants for the encoded atmosphere format.
 G = 9.80665
 EPSILON = 0.622
 
@@ -85,6 +82,7 @@ def load_metadata(path):
 def vmr_from_q(q):
     """
     Convert specific humidity (kg/kg) to volume mixing ratio.
+    Elementwise -- works unchanged on scalars, 1D, or 2D arrays.
     """
     return q / (EPSILON + (1.0 - EPSILON) * q)
 
@@ -97,7 +95,7 @@ def interpolate_surface(
     surface_height,
 ):
     """
-    Interpolate the atmospheric state to the surface.
+    Interpolate the atmospheric state to the surface (single sample, as before).
 
     Parameters
     ----------
@@ -157,7 +155,7 @@ def encode_atmosphere(
     vmr,
 ):
     """
-    Encode an atmosphere into the 30-feature NN input vector.
+    Encode an atmosphere into the 30-feature NN input vector (single sample).
     """
 
     row = np.empty(30, dtype=np.float32)
@@ -252,6 +250,218 @@ def build_atmosphere(
     return row, insert, ps, ts, vs
 
 
+# ==========================================================
+# VECTORIZED / BATCHED VERSIONS
+#
+# interpolate_surface() and encode_atmosphere() only do array math on
+# tiny (13-element) profiles, so calling them once per sample in a Python
+# loop is dominated by Python/NumPy call overhead rather than actual
+# compute. The functions below do the exact same math but across an
+# entire batch of N samples at once using NumPy broadcasting, which is
+# typically 1-2 orders of magnitude faster than looping in Python.
+#
+# They support two batching modes, both of which show up in this project:
+#
+#   (a) Fixed surface height, many timesteps
+#       -> height/temperature/vmr vary per-row (T, L), surface_height scalar
+#       (used when building the training pool / test-year encodings)
+#
+#   (b) Fixed timestep, many surface heights (e.g. DEM pixels)
+#       -> height/temperature/vmr are a single shared profile (L,),
+#          surface_height varies per-row (N,)
+#       (used when predicting across a whole DEM crop)
+#
+# Both are handled by broadcasting height/temperature/vmr to (N, L) if
+# they're passed in as 1D.
+# ==========================================================
+
+def interpolate_surface_batch(pressure_levels, height, temperature, vmr, surface_heights):
+    """
+    Vectorized version of interpolate_surface() for N samples at once.
+
+    Parameters
+    ----------
+    pressure_levels : (L,) ndarray
+        Shared pressure levels (Pa).
+    height, temperature, vmr : (L,) or (N, L) ndarray
+        Either a single shared profile (broadcast to all N samples) or
+        one profile per sample.
+    surface_heights : (N,) ndarray or scalar
+        Surface elevation(s) (m).
+
+    Returns
+    -------
+    insert : (N,) int ndarray
+    surface_pressure : (N,) ndarray
+    surface_temperature : (N,) ndarray
+    surface_vmr : (N,) ndarray
+    """
+    surface_heights = np.atleast_1d(np.asarray(surface_heights, dtype=np.float64))
+    N = surface_heights.shape[0]
+
+    pressure_levels = np.asarray(pressure_levels)
+    L = pressure_levels.shape[0]
+
+    height = np.broadcast_to(np.asarray(height), (N, L)) if np.asarray(height).ndim == 1 else np.asarray(height)
+    temperature = np.broadcast_to(np.asarray(temperature), (N, L)) if np.asarray(temperature).ndim == 1 else np.asarray(temperature)
+    vmr = np.broadcast_to(np.asarray(vmr), (N, L)) if np.asarray(vmr).ndim == 1 else np.asarray(vmr)
+
+    # insert[i] = number of pressure levels whose height is below surface_height[i]
+    insert = np.sum(height < surface_heights[:, None], axis=1)
+    insert = np.clip(insert, 1, L - 1)
+
+    rows = np.arange(N)
+    z0 = height[rows, insert - 1]
+    z1 = height[rows, insert]
+
+    denom = z1 - z0
+    safe_denom = np.where(denom == 0, 1.0, denom)
+    ratio = np.where(denom == 0, 0.0, (surface_heights - z0) / safe_denom)
+
+    logp0 = np.log(pressure_levels[insert - 1])
+    logp1 = np.log(pressure_levels[insert])
+    surface_pressure = np.exp(logp0 + ratio * (logp1 - logp0))
+
+    t0 = temperature[rows, insert - 1]
+    t1 = temperature[rows, insert]
+    surface_temperature = t0 + ratio * (t1 - t0)
+
+    v0 = vmr[rows, insert - 1]
+    v1 = vmr[rows, insert]
+    surface_vmr = v0 + ratio * (v1 - v0)
+
+    return insert, surface_pressure, surface_temperature, surface_vmr
+
+
+def encode_atmosphere_batch(insert, surface_pressure, surface_temperature, surface_vmr, temperature, vmr):
+    """
+    Vectorized version of encode_atmosphere() for N samples at once.
+
+    Parameters
+    ----------
+    insert, surface_pressure, surface_temperature, surface_vmr : (N,) ndarray
+    temperature, vmr : (L,) or (N, L) ndarray
+        Either a single shared profile or one profile per sample.
+
+    Returns
+    -------
+    X : (N, 4 + 2*L) float32 ndarray
+        Encoded rows (30 columns when L == 13, matching the original format).
+    """
+    insert = np.asarray(insert)
+    N = insert.shape[0]
+
+    temperature = np.asarray(temperature)
+    vmr = np.asarray(vmr)
+    if temperature.ndim == 1:
+        temperature = np.broadcast_to(temperature, (N, temperature.shape[0]))
+    if vmr.ndim == 1:
+        vmr = np.broadcast_to(vmr, (N, vmr.shape[0]))
+
+    L = temperature.shape[1]
+    X = np.empty((N, 4 + 2 * L), dtype=np.float32)
+
+    X[:, 0] = insert
+    X[:, 1] = np.round(surface_pressure / P_STEP)
+    X[:, 2] = np.round(surface_temperature / T_STEP)
+    X[:, 3] = np.round(surface_vmr / Q_STEP)
+    X[:, 4:4 + L] = np.round(temperature / T_STEP)
+    X[:, 4 + L:4 + 2 * L] = np.round(vmr / Q_STEP)
+
+    return X
+
+
+def build_atmosphere_batch_over_time(
+    temperature,
+    specific_humidity,
+    geopotential,
+    surface_height,
+    pressure_levels,
+    time_indices=None,
+):
+    """
+    Vectorized replacement for calling build_atmosphere() in a loop over
+    many timesteps at a FIXED surface height (e.g. building the training
+    pool, or encoding a full year of hours for one site).
+
+    Parameters
+    ----------
+    temperature, specific_humidity, geopotential : (T, L) ndarray
+        Full time series for one grid column, as returned by
+        load_pressure_dataset().
+    surface_height : float
+        Fixed surface elevation (m).
+    pressure_levels : (L,) ndarray
+    time_indices : (N,) int ndarray or None
+        Which timesteps to encode. If None, encodes every timestep.
+
+    Returns
+    -------
+    X : (N, 30) float32 ndarray
+    insert, surface_pressure, surface_temperature, surface_vmr : (N,) ndarray
+    """
+    if time_indices is not None:
+        time_indices = np.asarray(time_indices)
+        temperature = temperature[time_indices]
+        specific_humidity = specific_humidity[time_indices]
+        geopotential = geopotential[time_indices]
+
+    T_arr = np.asarray(temperature)
+    q = np.asarray(specific_humidity)
+    z = np.asarray(geopotential) / G
+    vmr = vmr_from_q(q)
+
+    N = T_arr.shape[0]
+    surface_heights = np.full(N, surface_height, dtype=np.float64)
+
+    insert, ps, ts, vs = interpolate_surface_batch(pressure_levels, z, T_arr, vmr, surface_heights)
+    X = encode_atmosphere_batch(insert, ps, ts, vs, T_arr, vmr)
+
+    return X, insert, ps, ts, vs
+
+
+def build_atmosphere_batch_over_heights(
+    temperature,
+    specific_humidity,
+    geopotential,
+    surface_heights,
+    pressure_levels,
+    time_index,
+):
+    """
+    Vectorized replacement for calling build_atmosphere() in a loop over
+    many surface heights (e.g. DEM pixels or unique elevations) at a FIXED
+    timestep.
+
+    Parameters
+    ----------
+    temperature, specific_humidity, geopotential : (T, L) ndarray
+        Full time series for one grid column.
+    surface_heights : (N,) ndarray
+        Surface elevations to evaluate (m), e.g. one per DEM pixel or
+        one per unique elevation value.
+    pressure_levels : (L,) ndarray
+    time_index : int
+        Which timestep to use (shared across all N rows).
+
+    Returns
+    -------
+    X : (N, 30) float32 ndarray
+    insert, surface_pressure, surface_temperature, surface_vmr : (N,) ndarray
+    """
+    T_row = np.asarray(temperature[time_index])
+    q_row = np.asarray(specific_humidity[time_index])
+    z_row = np.asarray(geopotential[time_index]) / G
+    vmr_row = vmr_from_q(q_row)
+
+    surface_heights = np.asarray(surface_heights, dtype=np.float64)
+
+    insert, ps, ts, vs = interpolate_surface_batch(pressure_levels, z_row, T_row, vmr_row, surface_heights)
+    X = encode_atmosphere_batch(insert, ps, ts, vs, T_row, vmr_row)
+
+    return X, insert, ps, ts, vs
+
+
 def compute_pwv(
     specific_humidity,
     pressure_levels,
@@ -286,22 +496,13 @@ def compute_pwv(
         Precipitable Water Vapour (kg/m² = mm)
     """
 
-    # --------------------------------------------------
-    # Insert surface pressure
-    # --------------------------------------------------
-
+    # Insert surface pressure.
     pressure = xp.insert(pressure_levels, insert_idx, surface_pressure)
 
-    # --------------------------------------------------
-    # Insert surface humidity
-    # --------------------------------------------------
-
+    # Insert surface humidity.
     q = xp.insert(specific_humidity, insert_idx, surface_specific_humidity)
 
-    # --------------------------------------------------
-    # Integrate only above the ground
-    # --------------------------------------------------
-
+    # Integrate only above the ground.
     pressure = pressure[insert_idx:]
     q = q[insert_idx:]
 
@@ -313,6 +514,7 @@ def compute_pwv(
 
     return float(pwv)
 
+
 def compute_pwv_dataset(
     specific_humidity,
     pressure_levels,
@@ -323,12 +525,12 @@ def compute_pwv_dataset(
     xp=cp,
 ):
     """
-    Compute PWV for an entire ERA5 dataset on the GPU.
+    Compute PWV for an entire ERA5 dataset.
 
     Parameters
     ----------
-    specific_humidity : (T, N)
-        Specific humidity profile.
+    specific_humidity : (T,H,W,N)
+        Specific humidity profiles.
 
     pressure_levels : (N,)
         Pressure levels (Pa).
@@ -337,12 +539,10 @@ def compute_pwv_dataset(
         Surface insertion indices.
 
     surface_pressure : (T,H,W)
-        Interpolated surface pressure (Pa).
+        Surface pressure (Pa).
 
     interpolation_ratio : (T,H,W)
-        Surface interpolation ratio.
-
-    chunk_size : int
+        Interpolation ratio between the two surrounding levels.
 
     Returns
     -------
@@ -360,57 +560,97 @@ def compute_pwv_dataset(
     surface_q = np.empty((T, H, W), dtype=np.float32)
 
     for start in range(0, T, chunk_size):
+
         end = min(start + chunk_size, T)
         t_len = end - start
+
         idx = insert_idx[start:end]
         ps = surface_pressure[start:end]
         q = specific_humidity[start:end]
         ratio = interpolation_ratio[start:end]
 
-        # --------------------------------------------------
+        ##################################################
         # Surface humidity
-        # --------------------------------------------------
+        ##################################################
 
-        t_idx3 = xp.arange(t_len).reshape(t_len, 1, 1)
+        q0 = xp.take_along_axis(
+            q,
+            (idx - 1)[..., None],
+            axis=-1,
+        )[..., 0]
 
-        q0 = q[t_idx3, idx - 1]
-
-        q1 = q[t_idx3, idx]
+        q1 = xp.take_along_axis(
+            q,
+            idx[..., None],
+            axis=-1,
+        )[..., 0]
 
         qs = q0 + ratio * (q1 - q0)
 
         surface_q[start:end] = xp.asnumpy(qs)
 
-        # --------------------------------------------------
+        ##################################################
         # Insert surface level
-        # --------------------------------------------------
+        ##################################################
 
-        k = xp.arange(pressure_levels.size + 1, dtype=idx.dtype).reshape(1, 1, 1, -1)
+        k = xp.arange(
+            pressure_levels.size + 1,
+            dtype=idx.dtype,
+        ).reshape(1, 1, 1, -1)
 
         shift = (k > idx[..., None]).astype(idx.dtype)
 
-        src = xp.clip(k - shift, 0, pressure_levels.size - 1)
-
-        t_idx4 = xp.arange(t_len).reshape(t_len, 1, 1, 1)
+        src = xp.clip(
+            k - shift,
+            0,
+            pressure_levels.size - 1,
+        )
 
         pressure = pressure_levels[src]
 
-        q_full = q[t_idx4, src]
+        q_full = xp.take_along_axis(
+            q,
+            src,
+            axis=-1,
+        )
 
-        xp.put_along_axis(pressure, idx[..., None], ps[..., None], axis=3)
-        xp.put_along_axis(q_full, idx[..., None], qs[..., None], axis=3)
+        xp.put_along_axis(
+            pressure,
+            idx[..., None],
+            ps[..., None],
+            axis=-1,
+        )
 
-        # --------------------------------------------------
+        xp.put_along_axis(
+            q_full,
+            idx[..., None],
+            qs[..., None],
+            axis=-1,
+        )
+
+        ##################################################
         # Integrate
-        # --------------------------------------------------
+        ##################################################
 
-        dp = xp.abs(pressure[..., 1:] - pressure[..., :-1])
-        q_avg = 0.5 * (q_full[..., 1:] + q_full[..., :-1])
-        k13 = xp.arange(pressure_levels.size, dtype=idx.dtype).reshape(1, 1, 1, -1)
+        dp = xp.abs(
+            pressure[..., 1:] - pressure[..., :-1]
+        )
+
+        q_avg = 0.5 * (
+            q_full[..., 1:] + q_full[..., :-1]
+        )
+
+        k13 = xp.arange(
+            pressure_levels.size,
+            dtype=idx.dtype,
+        ).reshape(1, 1, 1, -1)
 
         mask = k13 >= idx[..., None]
 
-        integral = xp.sum(xp.where(mask, q_avg * dp, 0.0), axis=-1)
+        integral = xp.sum(
+            xp.where(mask, q_avg * dp, 0.0),
+            axis=-1,
+        )
 
         pwv[start:end] = xp.asnumpy(integral / G)
 
@@ -421,6 +661,7 @@ def compute_pwv_dataset(
 
     print()
 
-    return pwv.astype(np.float32), surface_q.astype(np.float32)
-
-
+    return (
+        pwv.astype(np.float32),
+        surface_q.astype(np.float32),
+    )
